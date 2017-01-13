@@ -277,7 +277,7 @@ void PairMultiLucyRXKokkos<DeviceType>::operator()(TagPairMultiLucyRXCompute<NEI
   // The f array is atomic for Half/Thread neighbor style
   Kokkos::View<F_FLOAT*[3], typename DAT::t_f_array::array_layout,DeviceType,Kokkos::MemoryTraits<AtomicF<NEIGHFLAG>::value> > a_f = f;
 
-  int i,j,jj,inum,jnum,itype,jtype,itable;
+  int i,jj,inum,jnum,itype,jtype,itable;
   double xtmp,ytmp,ztmp,delx,dely,delz,evdwl,evdwlOld,fpair;
   double rsq;
 
@@ -326,7 +326,7 @@ void PairMultiLucyRXKokkos<DeviceType>::operator()(TagPairMultiLucyRXCompute<NEI
       //tb = &tables[tabindex[itype][jtype]];
       const int tidx = d_table_const.tabindex(itype,jtype);
 
-      //if (rho[i]*rho[i] < tb->innersq || rho[j]*rho[j] < tb->innersq){
+      //if (rho[i]*rho[i] < tb->innersq || rho[j]*rho[j] < tb->innersq)
       if (rho[i]*rho[i] < d_table_const.innersq(tidx) || rho[j]*rho[j] < d_table_const.innersq(tidx)){
         k_error_flag.d_view() = 1;
       }
@@ -431,7 +431,7 @@ void PairMultiLucyRXKokkos<DeviceType>::operator()(TagPairMultiLucyRXCompute<NEI
 
   //if (evflag) ev_tally(0,0,nlocal,newton_pair,evdwl,0.0,0.0,0.0,0.0,0.0);
   if (EVFLAG)
-    ev.evdwl += ((NEWTON_PAIR||(j<nlocal))?1.0:0.5)*evdwl;
+    ev.evdwl += ((NEWTON_PAIR||(i<nlocal))?1.0:0.5)*evdwl;
 }
 
 template<class DeviceType>
