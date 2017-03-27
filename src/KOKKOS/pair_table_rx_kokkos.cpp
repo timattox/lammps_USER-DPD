@@ -147,6 +147,7 @@ PairTableRXKokkos<DeviceType>::PairTableRXKokkos(LAMMPS *lmp) : PairTable(lmp)
   h_table = new TableHost();
   d_table = new TableDevice();
   fractionalWeighting = true;
+  site1 = site2 = NULL;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -158,6 +159,21 @@ PairTableRXKokkos<DeviceType>::~PairTableRXKokkos()
 
   memory->destroy_kokkos(k_eatom,eatom);
   memory->destroy_kokkos(k_vatom,vatom);
+
+  for (int m = 0; m < ntables; m++) free_table(&tables[m]);
+  memory->sfree(tables);
+
+  if (allocated) {
+    memory->destroy(setflag);
+    memory->sfree(cutsq); // use sfree because only top level was smalloc'ed
+    cutsq = NULL;
+    memory->sfree(tabindex); // use sfree because only top level was smalloc'ed
+    tabindex = NULL;
+    allocated = 0;
+  }
+
+  if (site1) delete [] site1;
+  if (site2) delete [] site2;
 
   delete h_table;
   h_table = nullptr;
@@ -984,6 +1000,10 @@ void PairTableRXKokkos<DeviceType>::settings(int narg, char **arg)
 
   if (allocated) {
     memory->destroy(setflag);
+    memory->sfree(cutsq); // use sfree because only top level was smalloc'ed
+    cutsq = NULL;
+    memory->sfree(tabindex); // use sfree because only top level was smalloc'ed
+    tabindex = NULL;
 
     d_table_const.tabindex = d_table->tabindex = typename ArrayTypes<DeviceType>::t_int_2d();
     h_table->tabindex = typename ArrayTypes<LMPHostType>::t_int_2d();
