@@ -86,6 +86,129 @@ void FixAveHisto::bin_one(double value)
   stats[0] += 1.0;
 }
 
+/* the main conflict here is between the fact that
+   we can't have variable-sized reduction value types
+   and the fact that doing one bin at a time would slow
+   this down considerably compared to the non-Kokkos version
+   in serial.
+   as a compromise, we'll process a compile-time-defined
+   number of bins at a time, and if there are more then we'll
+   have to repeat this process but if there are fewer
+   then our runtime should be similar */
+
+constexpr int block_size = 16;
+
+struct BinOut {
+  double minval;
+  double maxval;
+  double below;
+  double above;
+  double bins[block_size];
+  double total;
+};
+
+using DView = Kokkos::View<double*, LMPDeviceType>;
+using HView = typename DView::HostMirror;
+
+struct BinFunctor {
+  int stride;
+  double lo;
+  double hi;
+  double bininv;
+  DView view;
+  BinFunctor(int stride_in, double lo_in, double hi_in, DView view_in) {
+    stride = stride_in,
+    lo = lo_in;
+    hi = hi_in;
+    bininv = double(block_size) / (hi - lo);
+    view = view_in;
+  }
+  using value_type = BinOut;
+  KOKKOS_INLINE_FUNCTION init(value_type& update) const {
+    update.minval = BIG;
+    update.maxval = -BIG;
+    update.below = 0.0;
+    update.above = 0.0;
+    for (int j = 0; j < block_size; ++j) {
+      update.bins[j] = 0.0;
+    }
+    update.total = 0.0;
+  }
+  KOKKOS_INLINE_FUNCTION join(volatile value_type& update,
+      const volatile value_type& input) const {
+    update.minval = MIN(update.minval, input.minval);
+    update.maxval = MAX(update.maxval, input.maxval);
+    update.below += input.below;
+    update.above += input.above;
+    for (int j = 0; j < block_size; ++j) {
+      update.bins[j] += input.bins[j];
+    }
+    update.total += input.total;
+  }
+  KOKKOS_INLINE_FUNCTION void bin_one(int i, BinOut& out) const {
+    double value = view(i * stride); 
+    out.minval = MIN(out.minval, value);
+    out.maxval = MAX(out.minval, value);
+    if (value < lo) {
+      out.below += 1.0;
+    } else if (value > hi) {
+      out.above += 1.0;
+    } else {
+      double rbin = (value - lo) / bininv;
+      int ibin = static_cast<int>(rbin);
+      ibin = MIN(ibin, block_size - 1);
+      out.bins[ibin] += 1.0;
+    }
+    out.total += 1.0;
+  }
+};
+
+struct BinVectorFunctor : public BinFunctor {
+  BinVectorFunctor(int a, double b, double c, DView d):BinFunctor(a, b, c, d) {}
+  KOKKOS_INLINE_FUNCTION void operator()(int i, BinFunctor& out) const {
+    BinFunctor::bin_one(i, out);
+  }
+};
+
+using Mask = LAMMPS_NS::DAT::tdual_int_1d;
+
+struct BinAtomsFunctor : public BinFunctor {
+  Mask mask;
+  int groupbit;
+  BinAtomsFunctor(int a, double b, double c, DView d,
+      Mask mask_in, int groupbit_in):
+      BinFunctor(a, b, c, d) {
+    mask = mask_in;
+    groupbit = groupbit_in;
+  }
+  KOKKOS_INLINE_FUNCTION void operator()(int i, BinFunctor& out) const {
+    if (mask[i] & groupbit) BinFunctor::bin_one(i, out);
+  }
+};
+
+static BinOut bin_block(int n, int stride, double lo, double hi,
+    DView view, bool has_mask, Mask mask, int groupbit) {
+  BinOut out;
+  if (has_mask) {
+    Kokkos::parallel_reduce(n, BinAtomsFunctor(stride, lo, hi, view, mask, groupbit), out);
+  } else  {
+    Kokkos::parallel_reduce(n, BinVectorFunctor(stride, lo, hi, view), out);
+  }
+  return out;
+}
+
+static void bin_vector_kokkos(int n, double* values, int stride) {
+  DView d_values;
+  auto view_size = (n - 1) * stride + 1;
+  HView h_values(values, view_size);
+#ifdef KOKKOS_HAVE_CUDA
+  d_values = DView(view_size);
+  Kokkos::deep_copy(d_values, h_values);
+#else
+  d_values = h_values;
+#endif
+}
+
 /* ----------------------------------------------------------------------
    bin a vector of values with stride
 ------------------------------------------------------------------------- */
