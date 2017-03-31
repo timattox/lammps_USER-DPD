@@ -13,58 +13,28 @@
 
 #ifdef FIX_CLASS
 
-FixStyle(ave/histo,FixAveHisto)
+FixStyle(ave/histo/kk,FixAveHistoKokkos)
 
 #else
 
-#ifndef LMP_FIX_AVE_HISTO_H
-#define LMP_FIX_AVE_HISTO_H
+#ifndef LMP_FIX_AVE_HISTO_KOKKOS_H
+#define LMP_FIX_AVE_HISTO_KOKKOS_H
 
 #include <stdio.h>
-#include "fix.h"
+#include "fix_ave_histo.h"
 
 namespace LAMMPS_NS {
 
-class FixAveHisto : public Fix {
+class FixAveHistoKokkos : public Fix {
  public:
-  FixAveHisto(class LAMMPS *, int, char **);
-  virtual ~FixAveHisto();
-  int setmask();
-  void init();
-  void setup(int);
+  FixAveHistoKokkos(class LAMMPS *, int, char **);
+  virtual ~FixAveHistoKokkos();
   virtual void end_of_step();
-  double compute_vector(int);
-  double compute_array(int,int);
 
  protected:
-  int me,nvalues;
-  int nrepeat,nfreq,irepeat;
-  bigint nvalid,nvalid_last;
-  int *which,*argindex,*value2index;
-  char **ids;
-  FILE *fp;
-  double lo,hi,binsize,bininv;
-  int kind,beyond,overwrite;
-  long filepos;
-
-  double stats[4],stats_total[4],stats_all[4];
-  double **stats_list;
-
-  int nbins;
-  double *bin,*bin_total,*bin_all;
-  double **bin_list;
-  double *coord;
-
-  double *vector;
-  int maxatom;
-
-  int ave,nwindow,startstep,mode;
-  char *title1,*title2,*title3;
-  int iwindow,window_limit;
-
   void bin_one(double);
-  virtual void bin_vector(int, double *, int);
-  virtual void bin_atoms(double *, int);
+  void bin_vector(int, double *, int);
+  void bin_atoms(double *, int);
   void options(int, int, char **);
   bigint nextvalid();
 };
@@ -231,3 +201,4 @@ The specified file cannot be opened.  Check that the path and name are
 correct.
 
 */
+
