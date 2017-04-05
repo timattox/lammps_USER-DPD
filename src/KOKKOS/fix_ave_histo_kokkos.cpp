@@ -44,7 +44,7 @@ enum{IGNORE,END,EXTRA};
 #define BIG 1.0e20
 /* ---------------------------------------------------------------------- */
 
-FixAveHisto::FixAveHistoKokkos(LAMMPS *lmp, int narg, char **arg) :
+FixAveHistoKokkos::FixAveHistoKokkos(LAMMPS *lmp, int narg, char **arg) :
   FixAveHisto(lmp, narg, arg)
 {
 }
@@ -57,35 +57,6 @@ FixAveHistoKokkos::~FixAveHistoKokkos()
 
 /* ---------------------------------------------------------------------- */
 
-/* ----------------------------------------------------------------------
-   bin a single value
-------------------------------------------------------------------------- */
-
-void FixAveHisto::bin_one(double value)
-{
-  stats[2] = MIN(stats[2],value);
-  stats[3] = MAX(stats[3],value);
-
-  if (value < lo) {
-    if (beyond == IGNORE) {
-      stats[1] += 1.0;
-      return;
-    } else bin[0] += 1.0;
-  } else if (value > hi) {
-    if (beyond == IGNORE) {
-      stats[1] += 1.0;
-      return;
-    } else bin[nbins-1] += 1.0;
-  } else {
-    int ibin = static_cast<int> ((value-lo)*bininv);
-    ibin = MIN(ibin,nbins-1);
-    if (beyond == EXTRA) ibin++;
-    bin[ibin] += 1.0;
-  }
-
-  stats[0] += 1.0;
-}
-
 /* the main conflict here is between the fact that
    we can't have variable-sized reduction value types
    and the fact that doing one bin at a time would slow
@@ -96,7 +67,10 @@ void FixAveHisto::bin_one(double value)
    have to repeat this process but if there are fewer
    then our runtime should be similar */
 
-constexpr int block_size = 16;
+/* shamelessly setting this to the number of bins used for the
+   Gordon Bell attempt */
+
+constexpr int block_size = 100;
 
 struct BinOut {
   double minval;
@@ -170,7 +144,7 @@ struct BinVectorFunctor : public BinFunctor {
   }
 };
 
-using Mask = LAMMPS_NS::DAT::tdual_int_1d;
+using Mask = LAMMPS_NS::DAT::t_int_1d;
 
 struct BinAtomsFunctor : public BinFunctor {
   Mask mask;
@@ -197,7 +171,49 @@ static BinOut bin_block(int n, int stride, double lo, double hi,
   return out;
 }
 
-static void bin_vector_kokkos(int n, double* values, int stride) {
+static void bin_all(int n, int stride, double lo, double hi,
+    DView view, bool has_mask, Mask mask, int groupbit,
+    int beyond, int nbins, double* bins, double* stats) {
+  auto actual_nbins = nbins;
+  if (beyond == EXTRA) actual_nbins -= 2;
+  auto binsize = (hi - lo) / actual_nbins;
+  for (int ndone = 0; ndone < actual_nbins; ndone += block_size) {
+    auto block_lo = lo + (ndone * binsize);
+    auto block_hi = block_lo + (block_size * binsize);
+    auto block_out = bin_block(n, stride, block_lo, block_hi,
+        view, has_mask, mask, groupbit);
+    stats[1] = block_out.total;
+    stats[2] = block_out.min;
+    stats[3] = block_out.max;
+    for (int block_bin = 0; block_bin < block_size; ++block_bin) {
+      auto bin = block_bin + ndone;
+      if (bin < actual_nbins) {
+        if (beyond == EXTRA) ++bin;
+        bins[bin] = block_out.bins[block_bin];
+      } else {
+        block_out.above += block_out.bins[block_bin];
+      }
+    }
+    if (ndone == 0) {
+      if (beyond == IGNORE) {
+        stats[1] += block_out.below;
+      } else {
+        bins[0] += block_out.below;
+      }
+    }
+    if (ndone + block_size >= actual_nbins) {
+      if (beyond == IGNORE) {
+        stats[1] += block_out.above;
+      } else {
+        bins[nbins-1] += block_out.above;
+      }
+    }
+  }
+}
+
+static void bin_all(int n, int stride, double lo, double hi,
+    double* values, bool has_mask, Mask mask, int groupbit,
+    int beyond, int nbins, double* bins, double* stats) {
   DView d_values;
   auto view_size = (n - 1) * stride + 1;
   HView h_values(values, view_size);
@@ -207,6 +223,8 @@ static void bin_vector_kokkos(int n, double* values, int stride) {
 #else
   d_values = h_values;
 #endif
+  bin_all(n, stride, lo, hi, d_values, has_mask, mask, groupbit,
+      beyond, nbins, bins, stats);
 }
 
 /* ----------------------------------------------------------------------
@@ -215,11 +233,8 @@ static void bin_vector_kokkos(int n, double* values, int stride) {
 
 void FixAveHisto::bin_vector(int n, double *values, int stride)
 {
-  int m = 0;
-  for (int i = 0; i < n; i++) {
-    bin_one(values[m]);
-    m += stride;
-  }
+  bin_all(n, stride, lo, hi, values, false, Mask(), -1,
+      beyond, nbins, bin, stats);
 }
 
 /* ----------------------------------------------------------------------
@@ -229,122 +244,11 @@ void FixAveHisto::bin_vector(int n, double *values, int stride)
 
 void FixAveHisto::bin_atoms(double *values, int stride)
 {
-  int *mask = atom->mask;
   int nlocal = atom->nlocal;
+  auto atomKK = dynamic_cast<AtomKokkos*>(atom);
+  atomKK->k_mask.sync<LMPDeviceType>();
+  auto mask = atomKK->k_mask.view<LMPDeviceType>();
 
-  int m = 0;
-  for (int i = 0; i < nlocal; i++) {
-    if (mask[i] & groupbit) bin_one(values[m]);
-    m += stride;
-  }
+  bin_all(nlocal, stride, lo, hi, values, true, mask, groupbit,
+      beyond, nbins, bin, stats);
 }
-
-/* ----------------------------------------------------------------------
-   parse optional args
-------------------------------------------------------------------------- */
-
-void FixAveHisto::options(int iarg, int narg, char **arg)
-{
-  // option defaults
-
-  fp = NULL;
-  ave = ONE;
-  startstep = 0;
-  mode = SCALAR;
-  beyond = IGNORE;
-  overwrite = 0;
-  title1 = NULL;
-  title2 = NULL;
-  title3 = NULL;
-
-  // optional args
-
-  while (iarg < narg) {
-    if (strcmp(arg[iarg],"file") == 0) {
-      if (iarg+2 > narg) error->all(FLERR,"Illegal fix ave/histo command");
-      if (me == 0) {
-        fp = fopen(arg[iarg+1],"w");
-        if (fp == NULL) {
-          char str[128];
-          sprintf(str,"Cannot open fix ave/histo file %s",arg[iarg+1]);
-          error->one(FLERR,str);
-        }
-      }
-      iarg += 2;
-    } else if (strcmp(arg[iarg],"ave") == 0) {
-      if (iarg+2 > narg) error->all(FLERR,"Illegal fix ave/histo command");
-      if (strcmp(arg[iarg+1],"one") == 0) ave = ONE;
-      else if (strcmp(arg[iarg+1],"running") == 0) ave = RUNNING;
-      else if (strcmp(arg[iarg+1],"window") == 0) ave = WINDOW;
-      else error->all(FLERR,"Illegal fix ave/histo command");
-      if (ave == WINDOW) {
-        if (iarg+3 > narg) error->all(FLERR,"Illegal fix ave/histo command");
-        nwindow = force->inumeric(FLERR,arg[iarg+2]);
-        if (nwindow <= 0) error->all(FLERR,"Illegal fix ave/histo command");
-      }
-      iarg += 2;
-      if (ave == WINDOW) iarg++;
-    } else if (strcmp(arg[iarg],"start") == 0) {
-      if (iarg+2 > narg) error->all(FLERR,"Illegal fix ave/histo command");
-      startstep = force->inumeric(FLERR,arg[iarg+1]);
-      iarg += 2;
-    } else if (strcmp(arg[iarg],"mode") == 0) {
-      if (iarg+2 > narg) error->all(FLERR,"Illegal fix ave/histo command");
-      if (strcmp(arg[iarg+1],"scalar") == 0) mode = SCALAR;
-      else if (strcmp(arg[iarg+1],"vector") == 0) mode = VECTOR;
-      else error->all(FLERR,"Illegal fix ave/histo command");
-      iarg += 2;
-    } else if (strcmp(arg[iarg],"beyond") == 0) {
-      if (iarg+2 > narg) error->all(FLERR,"Illegal fix ave/histo command");
-      if (strcmp(arg[iarg+1],"ignore") == 0) beyond = IGNORE;
-      else if (strcmp(arg[iarg+1],"end") == 0) beyond = END;
-      else if (strcmp(arg[iarg+1],"extra") == 0) beyond = EXTRA;
-      else error->all(FLERR,"Illegal fix ave/histo command");
-      iarg += 2;
-    } else if (strcmp(arg[iarg],"overwrite") == 0) {
-      overwrite = 1;
-      iarg += 1;
-    } else if (strcmp(arg[iarg],"title1") == 0) {
-      if (iarg+2 > narg) error->all(FLERR,"Illegal fix ave/histo command");
-      delete [] title1;
-      int n = strlen(arg[iarg+1]) + 1;
-      title1 = new char[n];
-      strcpy(title1,arg[iarg+1]);
-      iarg += 2;
-    } else if (strcmp(arg[iarg],"title2") == 0) {
-      if (iarg+2 > narg) error->all(FLERR,"Illegal fix ave/histo command");
-      delete [] title2;
-      int n = strlen(arg[iarg+1]) + 1;
-      title2 = new char[n];
-      strcpy(title2,arg[iarg+1]);
-      iarg += 2;
-    } else if (strcmp(arg[iarg],"title3") == 0) {
-      if (iarg+2 > narg) error->all(FLERR,"Illegal fix ave/histo command");
-      delete [] title3;
-      int n = strlen(arg[iarg+1]) + 1;
-      title3 = new char[n];
-      strcpy(title3,arg[iarg+1]);
-      iarg += 2;
-    } else error->all(FLERR,"Illegal fix ave/histo command");
-  }
-}
-
-/* ----------------------------------------------------------------------
-   calculate nvalid = next step on which end_of_step does something
-   can be this timestep if multiple of nfreq and nrepeat = 1
-   else backup from next multiple of nfreq
-   startstep is lower bound on nfreq multiple
-------------------------------------------------------------------------- */
-
-bigint FixAveHisto::nextvalid()
-{
-  bigint nvalid = (update->ntimestep/nfreq)*nfreq + nfreq;
-  while (nvalid < startstep) nvalid += nfreq;
-  if (nvalid-nfreq == update->ntimestep && nrepeat == 1)
-    nvalid = update->ntimestep;
-  else
-    nvalid -= (nrepeat-1)*nevery;
-  if (nvalid < update->ntimestep) nvalid += nfreq;
-  return nvalid;
-}
-
