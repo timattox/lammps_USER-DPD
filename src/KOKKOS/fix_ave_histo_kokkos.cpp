@@ -169,9 +169,12 @@ static void bin_any(int n, int stride, double lo, double hi,
   auto actual_nbins = nbins;
   if (beyond == EXTRA) actual_nbins -= 2;
   auto binsize = (hi - lo) / actual_nbins;
+  double block_lo = lo;
   for (int ndone = 0; ndone < actual_nbins; ndone += block_size) {
-    auto block_lo = lo + (ndone * binsize);
     auto block_hi = block_lo + (block_size * binsize);
+    if (ndone + block_size == actual_nbins) {
+      block_hi = hi;
+    }
     auto block_out = bin_block(n, stride, block_lo, block_hi,
         view, has_mask, mask, groupbit);
     stats[1] = block_out.total;
@@ -200,6 +203,7 @@ static void bin_any(int n, int stride, double lo, double hi,
         bins[nbins-1] += block_out.above;
       }
     }
+    block_lo = block_hi;
   }
 }
 
