@@ -11,20 +11,10 @@
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
 
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include "fix_ave_histo.h"
+#include "fix_ave_histo_kokkos.h"
+#include "kokkos_type.h"
 #include "atom.h"
-#include "update.h"
-#include "modify.h"
-#include "compute.h"
-#include "group.h"
-#include "input.h"
-#include "variable.h"
-#include "memory.h"
-#include "error.h"
-#include "force.h"
+#include "atom_kokkos.h"
 
 using namespace LAMMPS_NS;
 using namespace FixConst;
@@ -85,6 +75,7 @@ using DView = Kokkos::View<double*, LMPDeviceType>;
 using HView = typename DView::HostMirror;
 
 struct BinFunctor {
+  using value_type = BinOut;
   int stride;
   double lo;
   double hi;
@@ -97,8 +88,7 @@ struct BinFunctor {
     bininv = double(block_size) / (hi - lo);
     view = view_in;
   }
-  using value_type = BinOut;
-  KOKKOS_INLINE_FUNCTION init(value_type& update) const {
+  KOKKOS_INLINE_FUNCTION void init(value_type& update) const {
     update.minval = BIG;
     update.maxval = -BIG;
     update.below = 0.0;
@@ -108,7 +98,7 @@ struct BinFunctor {
     }
     update.total = 0.0;
   }
-  KOKKOS_INLINE_FUNCTION join(volatile value_type& update,
+  KOKKOS_INLINE_FUNCTION void join(volatile value_type& update,
       const volatile value_type& input) const {
     update.minval = MIN(update.minval, input.minval);
     update.maxval = MAX(update.maxval, input.maxval);
@@ -138,15 +128,17 @@ struct BinFunctor {
 };
 
 struct BinVectorFunctor : public BinFunctor {
+  using value_type = BinFunctor::value_type;
   BinVectorFunctor(int a, double b, double c, DView d):BinFunctor(a, b, c, d) {}
-  KOKKOS_INLINE_FUNCTION void operator()(int i, BinFunctor& out) const {
+  KOKKOS_INLINE_FUNCTION void operator()(int i, BinOut& out) const {
     BinFunctor::bin_one(i, out);
   }
 };
 
-using Mask = LAMMPS_NS::DAT::t_int_1d;
+using Mask = ::DAT::t_int_1d;
 
 struct BinAtomsFunctor : public BinFunctor {
+  using value_type = BinFunctor::value_type;
   Mask mask;
   int groupbit;
   BinAtomsFunctor(int a, double b, double c, DView d,
@@ -155,7 +147,7 @@ struct BinAtomsFunctor : public BinFunctor {
     mask = mask_in;
     groupbit = groupbit_in;
   }
-  KOKKOS_INLINE_FUNCTION void operator()(int i, BinFunctor& out) const {
+  KOKKOS_INLINE_FUNCTION void operator()(int i, BinOut& out) const {
     if (mask[i] & groupbit) BinFunctor::bin_one(i, out);
   }
 };
@@ -171,7 +163,7 @@ static BinOut bin_block(int n, int stride, double lo, double hi,
   return out;
 }
 
-static void bin_all(int n, int stride, double lo, double hi,
+static void bin_any(int n, int stride, double lo, double hi,
     DView view, bool has_mask, Mask mask, int groupbit,
     int beyond, int nbins, double* bins, double* stats) {
   auto actual_nbins = nbins;
@@ -183,8 +175,8 @@ static void bin_all(int n, int stride, double lo, double hi,
     auto block_out = bin_block(n, stride, block_lo, block_hi,
         view, has_mask, mask, groupbit);
     stats[1] = block_out.total;
-    stats[2] = block_out.min;
-    stats[3] = block_out.max;
+    stats[2] = block_out.minval;
+    stats[3] = block_out.maxval;
     for (int block_bin = 0; block_bin < block_size; ++block_bin) {
       auto bin = block_bin + ndone;
       if (bin < actual_nbins) {
@@ -211,7 +203,7 @@ static void bin_all(int n, int stride, double lo, double hi,
   }
 }
 
-static void bin_all(int n, int stride, double lo, double hi,
+static void bin_any(int n, int stride, double lo, double hi,
     double* values, bool has_mask, Mask mask, int groupbit,
     int beyond, int nbins, double* bins, double* stats) {
   DView d_values;
@@ -223,7 +215,7 @@ static void bin_all(int n, int stride, double lo, double hi,
 #else
   d_values = h_values;
 #endif
-  bin_all(n, stride, lo, hi, d_values, has_mask, mask, groupbit,
+  bin_any(n, stride, lo, hi, d_values, has_mask, mask, groupbit,
       beyond, nbins, bins, stats);
 }
 
@@ -231,9 +223,9 @@ static void bin_all(int n, int stride, double lo, double hi,
    bin a vector of values with stride
 ------------------------------------------------------------------------- */
 
-void FixAveHisto::bin_vector(int n, double *values, int stride)
+void FixAveHistoKokkos::bin_vector(int n, double *values, int stride)
 {
-  bin_all(n, stride, lo, hi, values, false, Mask(), -1,
+  bin_any(n, stride, lo, hi, values, false, Mask(), -1,
       beyond, nbins, bin, stats);
 }
 
@@ -242,13 +234,13 @@ void FixAveHisto::bin_vector(int n, double *values, int stride)
    only bin if atom is in group
 ------------------------------------------------------------------------- */
 
-void FixAveHisto::bin_atoms(double *values, int stride)
+void FixAveHistoKokkos::bin_atoms(double *values, int stride)
 {
   int nlocal = atom->nlocal;
   auto atomKK = dynamic_cast<AtomKokkos*>(atom);
   atomKK->k_mask.sync<LMPDeviceType>();
   auto mask = atomKK->k_mask.view<LMPDeviceType>();
 
-  bin_all(nlocal, stride, lo, hi, values, true, mask, groupbit,
+  bin_any(nlocal, stride, lo, hi, values, true, mask, groupbit,
       beyond, nbins, bin, stats);
 }

@@ -25,7 +25,7 @@ FixStyle(ave/histo/kk,FixAveHistoKokkos)
 
 namespace LAMMPS_NS {
 
-class FixAveHistoKokkos : public Fix {
+class FixAveHistoKokkos : public FixAveHisto {
  public:
   FixAveHistoKokkos(class LAMMPS *, int, char **);
   virtual ~FixAveHistoKokkos();
