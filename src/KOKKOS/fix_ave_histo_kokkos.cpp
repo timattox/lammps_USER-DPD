@@ -11,6 +11,10 @@
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
 
+/* ----------------------------------------------------------------------
+   Contributing author: Dan Ibanez (SNL)
+------------------------------------------------------------------------- */
+
 #include "fix_ave_histo_kokkos.h"
 #include "kokkos_type.h"
 #include "atom.h"
