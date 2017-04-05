@@ -112,13 +112,13 @@ struct BinFunctor {
   KOKKOS_INLINE_FUNCTION void bin_one(int i, BinOut& out) const {
     double value = view(i * stride); 
     out.minval = MIN(out.minval, value);
-    out.maxval = MAX(out.minval, value);
+    out.maxval = MAX(out.maxval, value);
     if (value < lo) {
       out.below += 1.0;
     } else if (value > hi) {
       out.above += 1.0;
     } else {
-      double rbin = (value - lo) / bininv;
+      double rbin = (value - lo) * bininv;
       int ibin = static_cast<int>(rbin);
       ibin = MIN(ibin, block_size - 1);
       out.bins[ibin] += 1.0;
@@ -177,7 +177,7 @@ static void bin_any(int n, int stride, double lo, double hi,
     }
     auto block_out = bin_block(n, stride, block_lo, block_hi,
         view, has_mask, mask, groupbit);
-    stats[1] = block_out.total;
+    stats[0] = block_out.total;
     stats[2] = block_out.minval;
     stats[3] = block_out.maxval;
     for (int block_bin = 0; block_bin < block_size; ++block_bin) {
