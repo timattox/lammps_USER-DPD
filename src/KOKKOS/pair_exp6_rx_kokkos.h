@@ -52,10 +52,40 @@ struct PairExp6ParamDataTypeKokkos
    {}
 };
 
+template<class DeviceType>
+struct PairExp6ParamDataTypeKokkosVect
+{
+  typedef ArrayTypes<DeviceType> AT;
+
+   typename AT::t_float_1d epsilon, rm3, alpha, xMolei, epsilon_old, rm3_old,
+                           alpha_old, xMolei_old, fractionOFA, fraction1,
+                           fraction2, nMoleculesOFA, nMolecules1, nMolecules2,
+                           nTotal, fractionOFAold, fractionOld1, fractionOld2,
+                           nMoleculesOFAold, nMoleculesOld1, nMoleculesOld2,
+                           nTotalold;
+
+   // Default constructor -- nullify everything.
+   PairExp6ParamDataTypeKokkosVect<DeviceType>(void)
+      : epsilon(NULL), rm3(NULL), alpha(NULL), xMolei(NULL), epsilon_old(NULL), rm3_old(NULL),
+        alpha_old(NULL), xMolei_old(NULL), fractionOFA(NULL), fraction1(NULL),
+        fraction2(NULL), nMoleculesOFA(NULL), nMolecules1(NULL), nMolecules2(NULL),
+        nTotal(NULL), fractionOFAold(NULL), fractionOld1(NULL), fractionOld2(NULL),
+        nMoleculesOFAold(NULL), nMoleculesOld1(NULL), nMoleculesOld2(NULL),
+        nTotalold(NULL)
+   {}
+};
+
+struct TagPairExp6rxZeroMixingWeights{};
 struct TagPairExp6rxgetMixingWeights{};
 
 template<int NEIGHFLAG, int NEWTON_PAIR, int EVFLAG>
 struct TagPairExp6rxCompute{};
+
+template<int NEIGHFLAG, int NEWTON_PAIR, int EVFLAG>
+struct TagPairExp6rxComputeNoAtomics{};
+
+struct TagPairExp6rxCollapseDupViews{};
+struct TagPairExp6rxZeroDupViews{};
 
 template<class DeviceType>
 class PairExp6rxKokkos : public PairExp6rx {
@@ -71,6 +101,9 @@ class PairExp6rxKokkos : public PairExp6rx {
   void init_style();
 
   KOKKOS_INLINE_FUNCTION
+  void operator()(TagPairExp6rxZeroMixingWeights, const int&) const;
+
+  KOKKOS_INLINE_FUNCTION
   void operator()(TagPairExp6rxgetMixingWeights, const int&) const;
 
   template<int NEIGHFLAG, int NEWTON_PAIR, int EVFLAG>
@@ -80,6 +113,24 @@ class PairExp6rxKokkos : public PairExp6rx {
   template<int NEIGHFLAG, int NEWTON_PAIR, int EVFLAG>
   KOKKOS_INLINE_FUNCTION
   void operator()(TagPairExp6rxCompute<NEIGHFLAG,NEWTON_PAIR,EVFLAG>, const int&) const;
+
+  template<int NEIGHFLAG, int NEWTON_PAIR, int EVFLAG>
+  KOKKOS_INLINE_FUNCTION
+  void operator()(TagPairExp6rxComputeNoAtomics<NEIGHFLAG,NEWTON_PAIR,EVFLAG>, const int&, EV_FLOAT&) const;
+
+  template<int NEIGHFLAG, int NEWTON_PAIR, int EVFLAG, bool Site1EqSite2, bool UseAtomics, bool OneType>
+  KOKKOS_INLINE_FUNCTION
+  void vectorized_operator(const int&, EV_FLOAT&) const;
+
+  template<int NEIGHFLAG, int NEWTON_PAIR, int EVFLAG>
+  KOKKOS_INLINE_FUNCTION
+  void operator()(TagPairExp6rxComputeNoAtomics<NEIGHFLAG,NEWTON_PAIR,EVFLAG>, const int&) const;
+
+  KOKKOS_INLINE_FUNCTION
+  void operator()(TagPairExp6rxCollapseDupViews, const int&) const;
+
+  KOKKOS_INLINE_FUNCTION
+  void operator()(TagPairExp6rxZeroDupViews, const int&) const;
 
   template<int NEIGHFLAG, int NEWTON_PAIR>
   KOKKOS_INLINE_FUNCTION
@@ -94,6 +145,7 @@ class PairExp6rxKokkos : public PairExp6rx {
   int eflag,vflag;
   int nlocal,newton_pair,neighflag;
   double special_lj[4];
+  int num_threads,ntypes;
 
   typename AT::t_x_array_randomread x;
   typename AT::t_f_array f;
@@ -101,10 +153,16 @@ class PairExp6rxKokkos : public PairExp6rx {
   typename AT::t_efloat_1d uCG, uCGnew;
   typename AT::t_float_2d dvector;
 
+  typedef Kokkos::View<F_FLOAT**[3],Kokkos::LayoutRight,DeviceType> t_f_array_thread;
+  typedef Kokkos::View<E_FLOAT**,Kokkos::LayoutRight,DeviceType> t_efloat_1d_thread;
+
+  t_f_array_thread t_f;
+  t_efloat_1d_thread t_uCG, t_uCGnew;
+
   DAT::tdual_efloat_1d k_eatom;
   DAT::tdual_virial_array k_vatom;
-  DAT::t_efloat_1d d_eatom;
-  DAT::t_virial_array d_vatom;
+  typename AT::t_efloat_1d d_eatom;
+  typename AT::t_virial_array d_vatom;
 
   DAT::tdual_int_scalar k_error_flag;
 
@@ -113,6 +171,7 @@ class PairExp6rxKokkos : public PairExp6rx {
   typename AT::t_int_1d_randomread d_numneigh;
 
   PairExp6ParamDataTypeKokkos<DeviceType> PairExp6ParamData;
+  PairExp6ParamDataTypeKokkosVect<DeviceType> PairExp6ParamDataVect;
 
   void allocate();
   DAT::tdual_int_1d k_mol2param;               // mapping from molecule to parameters
@@ -132,6 +191,9 @@ class PairExp6rxKokkos : public PairExp6rx {
 
   KOKKOS_INLINE_FUNCTION
   void getMixingWeights(int, double &, double &, double &, double &, double &, double &, double &, double &, double &, double &, double &, double &, double &, double &, double &, double &) const;
+
+  template <class ArrayT>
+  void getMixingWeightsVect(const int, int, ArrayT &, ArrayT &, ArrayT &, ArrayT &, ArrayT &, ArrayT &, ArrayT &, ArrayT &, ArrayT &, ArrayT &, ArrayT &, ArrayT &, ArrayT &, ArrayT &, ArrayT &, ArrayT &) const;
 
   KOKKOS_INLINE_FUNCTION
   void exponentScaling(double, double &, double &) const;

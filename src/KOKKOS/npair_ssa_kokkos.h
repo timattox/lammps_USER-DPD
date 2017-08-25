@@ -41,9 +41,11 @@ class NPairSSAKokkos : public NPair {
   // SSA Work plan data structures
   int ssa_phaseCt;
   DAT::tdual_int_1d k_ssa_phaseLen;
+  DAT::tdual_int_1d_3 k_ssa_phaseOff;
   DAT::tdual_int_2d k_ssa_itemLoc;
   DAT::tdual_int_2d k_ssa_itemLen;
   typename AT::t_int_1d ssa_phaseLen;
+  typename AT::t_int_1d_3 ssa_phaseOff;
   typename AT::t_int_2d ssa_itemLoc;
   typename AT::t_int_2d ssa_itemLen;
 
@@ -175,6 +177,7 @@ class NPairSSAKokkosExecute
   // SSA Work plan data structures
   int ssa_phaseCt;
   typename AT::t_int_1d d_ssa_phaseLen;
+  typename AT::t_int_1d_3_const d_ssa_phaseOff;
   typename AT::t_int_2d d_ssa_itemLoc;
   typename AT::t_int_2d d_ssa_itemLen;
   int ssa_gphaseCt;
@@ -198,6 +201,7 @@ class NPairSSAKokkosExecute
         const typename AT::t_int_1d &_d_nstencil_ssa,
         const int _ssa_phaseCt,
         const typename AT::t_int_1d &_d_ssa_phaseLen,
+        const typename AT::t_int_1d_3 &_d_ssa_phaseOff,
         const typename AT::t_int_2d &_d_ssa_itemLoc,
         const typename AT::t_int_2d &_d_ssa_itemLen,
         const int _ssa_gphaseCt,
@@ -242,6 +246,7 @@ class NPairSSAKokkosExecute
     d_stencil(_d_stencil),d_stencilxyz(_d_stencilxyz),d_nstencil_ssa(_d_nstencil_ssa),
     ssa_phaseCt(_ssa_phaseCt),
     d_ssa_phaseLen(_d_ssa_phaseLen),
+    d_ssa_phaseOff(_d_ssa_phaseOff),
     d_ssa_itemLoc(_d_ssa_itemLoc),
     d_ssa_itemLen(_d_ssa_itemLen),
     ssa_gphaseCt(_ssa_gphaseCt),
@@ -270,7 +275,7 @@ class NPairSSAKokkosExecute
     bboxlo[0] = _bboxlo[0]; bboxlo[1] = _bboxlo[1]; bboxlo[2] = _bboxlo[2];
     bboxhi[0] = _bboxhi[0]; bboxhi[1] = _bboxhi[1]; bboxhi[2] = _bboxhi[2];
 
-    resize = typename AT::t_int_scalar("NeighborKokkosFunctor::resize");
+    resize = typename AT::t_int_scalar("NPairSSAKokkosExecute::resize");
 #ifndef KOKKOS_USE_CUDA_UVM
     h_resize = Kokkos::create_mirror_view(resize);
 #else
@@ -278,7 +283,7 @@ class NPairSSAKokkosExecute
 #endif
     h_resize() = 1;
     new_maxneighs = typename AT::
-      t_int_scalar("NeighborKokkosFunctor::new_maxneighs");
+      t_int_scalar("NPairSSAKokkosExecute::new_maxneighs");
 #ifndef KOKKOS_USE_CUDA_UVM
     h_new_maxneighs = Kokkos::create_mirror_view(new_maxneighs);
 #else
@@ -289,8 +294,11 @@ class NPairSSAKokkosExecute
 
   ~NPairSSAKokkosExecute() {neigh_list.copymode = 1;};
 
-  void build_locals();
-  void build_ghosts();
+  KOKKOS_FUNCTION
+  void build_locals_onePhase(const bool firstTry, int me, int workPhase) const;
+
+  KOKKOS_FUNCTION
+  void build_ghosts_onePhase(int workPhase) const;
 
   KOKKOS_INLINE_FUNCTION
   int coord2bin(const X_FLOAT & x,const X_FLOAT & y,const X_FLOAT & z, int* i) const

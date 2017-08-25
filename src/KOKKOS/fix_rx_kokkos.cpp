@@ -79,6 +79,17 @@ FixRxKokkos<DeviceType>::~FixRxKokkos()
 {
   //printf("Inside FixRxKokkos::~FixRxKokkos copymode= %d\n", copymode);
   if (copymode) return;
+
+  if (localTempFlag)
+    memory->destroy_kokkos(k_dpdThetaLocal, dpdThetaLocal);
+
+  memory->destroy_kokkos(k_sumWeights, sumWeights);
+  //memory->destroy_kokkos(k_sumWeights);
+
+  //delete [] scratchSpace;
+  memory->destroy_kokkos(d_scratchSpace);
+
+  memory->destroy_kokkos(k_cutsq);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1389,10 +1400,10 @@ void FixRxKokkos<DeviceType>::operator()(Tag_FixRxKokkos_solveSystems<ZERO_RATES
     // Store the solution back in dvector.
     for (int ispecies = 0; ispecies < nspecies; ispecies++)
     {
-      if (y[ispecies] < -MY_EPSILON)
+      if (y[ispecies] < -1.0e-10)
       {
-        //error->one(FLERR,"Computed concentration in RK solver is < -10*DBL_EPSILON");
-        k_error_flag.d_view() = 2;
+        //error->one(FLERR,"Computed concentration in RK solver is < -1.0e-10");
+        k_error_flag.template view<DeviceType>()() = 2;
         // This should be an atomic update.
       }
       else if (y[ispecies] < MY_EPSILON)
@@ -1433,9 +1444,12 @@ void FixRxKokkos<DeviceType>::solve_reactions(const int vflag, const bool isPreF
   {
     const int count = nlocal + (newton_pair ? nghost : 0);
 
-    memory->create_kokkos (k_dpdThetaLocal, dpdThetaLocal, count, "FixRxKokkos::dpdThetaLocal");
-    this->d_dpdThetaLocal = k_dpdThetaLocal.d_view;
-    this->h_dpdThetaLocal = k_dpdThetaLocal.h_view;
+    if (count > k_dpdThetaLocal.template view<DeviceType>().dimension_0()) {
+      memory->destroy_kokkos (k_dpdThetaLocal, dpdThetaLocal);
+      memory->create_kokkos (k_dpdThetaLocal, dpdThetaLocal, count, "FixRxKokkos::dpdThetaLocal");
+      this->d_dpdThetaLocal = k_dpdThetaLocal.template view<DeviceType>();
+      this->h_dpdThetaLocal = k_dpdThetaLocal.h_view;
+    }
 
     const int neighflag = lmp->kokkos->neighflag;
 
@@ -1500,8 +1514,8 @@ void FixRxKokkos<DeviceType>::solve_reactions(const int vflag, const bool isPreF
     memory->create_kokkos (k_diagnosticCounterPerODEnSteps, diagnosticCounterPerODEnSteps, nlocal, "FixRxKokkos::diagnosticCounterPerODEnSteps");
     memory->create_kokkos (k_diagnosticCounterPerODEnFuncs, diagnosticCounterPerODEnFuncs, nlocal, "FixRxKokkos::diagnosticCounterPerODEnFuncs");
 
-    d_diagnosticCounterPerODEnSteps = k_diagnosticCounterPerODEnSteps.d_view;
-    d_diagnosticCounterPerODEnFuncs = k_diagnosticCounterPerODEnFuncs.d_view;
+    d_diagnosticCounterPerODEnSteps = k_diagnosticCounterPerODEnSteps.template view<DeviceType>();
+    d_diagnosticCounterPerODEnFuncs = k_diagnosticCounterPerODEnFuncs.template view<DeviceType>();
 
     Kokkos::parallel_for ( Kokkos::RangePolicy<DeviceType, Tag_FixRxKokkos_zeroCounterViews>(0,nlocal), *this);
     //Kokkos::parallel_for ( nlocal,
@@ -1527,7 +1541,10 @@ void FixRxKokkos<DeviceType>::solve_reactions(const int vflag, const bool isPreF
   //double *scratchSpace = new double[ scratchSpaceSize * nlocal ];
 
   //typename ArrayTypes<DeviceType>::t_double_1d d_scratchSpace("d_scratchSpace", scratchSpaceSize * nlocal);
-  memory->create_kokkos (d_scratchSpace, nlocal*scratchSpaceSize, "FixRxKokkos::d_scratchSpace");
+  if (nlocal*scratchSpaceSize > d_scratchSpace.dimension_0()) {
+    memory->destroy_kokkos (d_scratchSpace);
+    memory->create_kokkos (d_scratchSpace, nlocal*scratchSpaceSize, "FixRxKokkos::d_scratchSpace");
+  }
 
 #if 0
   Kokkos::parallel_reduce( nlocal, LAMMPS_LAMBDA(int i, CounterType &counter)
@@ -1599,10 +1616,10 @@ void FixRxKokkos<DeviceType>::solve_reactions(const int vflag, const bool isPreF
         // Store the solution back in dvector.
         for (int ispecies = 0; ispecies < nspecies; ispecies++)
         {
-          if (y[ispecies] < -MY_EPSILON)
+          if (y[ispecies] < -1.0e-10)
           {
-            //error->one(FLERR,"Computed concentration in RK solver is < -10*DBL_EPSILON");
-            k_error_flag.d_view() = 2;
+            //error->one(FLERR,"Computed concentration in RK solver is < -1.0e-10");
+            k_error_flag.template view<DeviceType>()() = 2;
             // This should be an atomic update.
           }
           else if (y[ispecies] < MY_EPSILON)
@@ -1630,16 +1647,13 @@ void FixRxKokkos<DeviceType>::solve_reactions(const int vflag, const bool isPreF
     Kokkos::parallel_reduce( Kokkos::RangePolicy<DeviceType, Tag_FixRxKokkos_solveSystems<false> >(0,nlocal), *this, TotalCounters);
 #endif
 
-  //delete [] scratchSpace;
-  memory->destroy_kokkos (d_scratchSpace);
-
   TimerType timer_ODE = getTimeStamp();
 
   // Check the error flag for any failures.
   k_error_flag.template modify<DeviceType>();
   k_error_flag.template sync<LMPHostType>();
   if (k_error_flag.h_view() == 2)
-    error->one(FLERR,"Computed concentration in RK solver is < -10*DBL_EPSILON");
+    error->one(FLERR,"Computed concentration in RK solver is < -1.0e-10");
 
   // Signal that dvector has been modified on this execution space.
   atomKK->modified( execution_space, DVECTOR_MASK );
@@ -1650,9 +1664,6 @@ void FixRxKokkos<DeviceType>::solve_reactions(const int vflag, const bool isPreF
   comm->forward_comm_fix(this);
 
   atomKK->modified ( Host, DVECTOR_MASK );
-
-  if (localTempFlag)
-    memory->destroy_kokkos(k_dpdThetaLocal, dpdThetaLocal);
 
   TimerType timer_stop = getTimeStamp();
 
@@ -1896,7 +1907,7 @@ void FixRxKokkos<DeviceType>::operator()(Tag_FixRxKokkos_firstPairOperator<WT_FL
 {
   // Create an atomic view of sumWeights and dpdThetaLocal. Only needed
   // for Half/thread scenarios.
-  typedef Kokkos::View< E_FLOAT*, typename DAT::t_efloat_1d::array_layout, typename DAT::t_efloat_1d::device_type, Kokkos::MemoryTraits< AtomicF< NEIGHFLAG >::value> > AtomicViewType;
+  typedef Kokkos::View< E_FLOAT*, typename DAT::t_efloat_1d::array_layout, DeviceType, Kokkos::MemoryTraits< AtomicF< NEIGHFLAG >::value> > AtomicViewType;
 
   AtomicViewType a_dpdThetaLocal = d_dpdThetaLocal;
   AtomicViewType a_sumWeights    = d_sumWeights;
@@ -2012,8 +2023,11 @@ void FixRxKokkos<DeviceType>::computeLocalTemperature()
     const int ntypes = atom->ntypes;
 
     //memory->create_kokkos (k_cutsq, h_cutsq, ntypes+1, ntypes+1, "pair:cutsq");
-    memory->create_kokkos (k_cutsq, ntypes+1, ntypes+1, "FixRxKokkos::k_cutsq");
-    d_cutsq = k_cutsq.template view<DeviceType>();
+    if (ntypes+1 > k_cutsq.dimension_0()) {
+      memory->destroy_kokkos (k_cutsq);
+      memory->create_kokkos (k_cutsq, ntypes+1, ntypes+1, "FixRxKokkos::k_cutsq");
+      d_cutsq = k_cutsq.template view<DeviceType>();
+    }
 
     for (int i = 1; i <= ntypes; ++i)
       for (int j = i; j <= ntypes; ++j)
@@ -2030,9 +2044,12 @@ void FixRxKokkos<DeviceType>::computeLocalTemperature()
   int sumWeightsCt = nlocal + (NEWTON_PAIR ? nghost : 0);
 
   //memory->create_kokkos (k_sumWeights, sumWeights, sumWeightsCt, "FixRxKokkos::sumWeights");
-  memory->create_kokkos (k_sumWeights, sumWeightsCt, "FixRxKokkos::sumWeights");
-  d_sumWeights = k_sumWeights.d_view;
-  h_sumWeights = k_sumWeights.h_view;
+  if (sumWeightsCt > k_sumWeights.template view<DeviceType>().dimension_0()) {
+    memory->destroy_kokkos(k_sumWeights, sumWeights);
+    memory->create_kokkos (k_sumWeights, sumWeightsCt, "FixRxKokkos::sumWeights");
+    d_sumWeights = k_sumWeights.template view<DeviceType>();
+    h_sumWeights = k_sumWeights.h_view;
+  }
 
   // Initialize the accumulator to zero ...
   //Kokkos::parallel_for (sumWeightsCt,
@@ -2066,7 +2083,7 @@ void FixRxKokkos<DeviceType>::computeLocalTemperature()
           // Create an atomic view of sumWeights and dpdThetaLocal. Only needed
           // for Half/thread scenarios.
           //typedef Kokkos::View< E_FLOAT*, typename DAT::t_efloat_1d::array_layout, DeviceType, Kokkos::MemoryTraits< AtomicF< NEIGHFLAG >::value> > AtomicViewType;
-          typedef Kokkos::View< E_FLOAT*, typename DAT::t_efloat_1d::array_layout, typename DAT::t_efloat_1d::device_type, Kokkos::MemoryTraits< AtomicF< NEIGHFLAG >::value> > AtomicViewType;
+          typedef Kokkos::View< E_FLOAT*, typename DAT::t_efloat_1d::array_layout, DeviceType, Kokkos::MemoryTraits< AtomicF< NEIGHFLAG >::value> > AtomicViewType;
 
           AtomicViewType a_dpdThetaLocal = d_dpdThetaLocal;
           AtomicViewType a_sumWeights    = d_sumWeights;
@@ -2165,11 +2182,6 @@ void FixRxKokkos<DeviceType>::computeLocalTemperature()
   Kokkos::parallel_for (Kokkos::RangePolicy<DeviceType, Tag_FixRxKokkos_2ndPairOperator<WT_FLAG, LOCAL_TEMP_FLAG> >(0, nlocal), *this);
 #endif
 
-  // Clean up the local kokkos data.
-  //memory->destroy_kokkos(k_cutsq, h_cutsq);
-  memory->destroy_kokkos(k_cutsq);
-  //memory->destroy_kokkos(k_sumWeights, sumWeights);
-  memory->destroy_kokkos(k_sumWeights);
 }
 
 /* ---------------------------------------------------------------------- */

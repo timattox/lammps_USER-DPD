@@ -155,12 +155,12 @@ void PairMultiLucyRXKokkos<DeviceType>::compute_style(int eflag_in, int vflag_in
   if (eflag_atom) {
     memory->destroy_kokkos(k_eatom,eatom);
     memory->create_kokkos(k_eatom,eatom,maxeatom,"pair:eatom");
-    d_eatom = k_eatom.d_view;
+    d_eatom = k_eatom.template view<DeviceType>();
   }
   if (vflag_atom) {
     memory->destroy_kokkos(k_vatom,vatom);
     memory->create_kokkos(k_vatom,vatom,maxvatom,6,"pair:vatom");
-    d_vatom = k_vatom.d_view;
+    d_vatom = k_vatom.template view<DeviceType>();
   }
 
   x = atomKK->k_x.view<DeviceType>();
@@ -180,10 +180,12 @@ void PairMultiLucyRXKokkos<DeviceType>::compute_style(int eflag_in, int vflag_in
 
   {
     const int ntotal = nlocal + nghost;
-    d_mixWtSite1old = typename AT::t_float_1d("PairMultiLucyRX::mixWtSite1old",ntotal);
-    d_mixWtSite2old = typename AT::t_float_1d("PairMultiLucyRX::mixWtSite2old",ntotal);
-    d_mixWtSite1 = typename AT::t_float_1d("PairMultiLucyRX::mixWtSite1",ntotal);
-    d_mixWtSite2 = typename AT::t_float_1d("PairMultiLucyRX::mixWtSite2",ntotal);
+    if (ntotal > d_mixWtSite1.dimension_0()) {
+      d_mixWtSite1old = typename AT::t_float_1d("PairMultiLucyRX::mixWtSite1old",ntotal);
+      d_mixWtSite2old = typename AT::t_float_1d("PairMultiLucyRX::mixWtSite2old",ntotal);
+      d_mixWtSite1 = typename AT::t_float_1d("PairMultiLucyRX::mixWtSite1",ntotal);
+      d_mixWtSite2 = typename AT::t_float_1d("PairMultiLucyRX::mixWtSite2",ntotal);
+    }
 
     Kokkos::parallel_for(Kokkos::RangePolicy<DeviceType, TagPairMultiLucyRXgetMixingWeights>(0,ntotal),*this);
   }
@@ -326,7 +328,7 @@ void PairMultiLucyRXKokkos<DeviceType>::operator()(TagPairMultiLucyRXCompute<NEI
 
       //if (rho[i]*rho[i] < tb->innersq || rho[j]*rho[j] < tb->innersq){
       if (rho[i]*rho[i] < d_table_const.innersq(tidx) || rho[j]*rho[j] < d_table_const.innersq(tidx)){
-        k_error_flag.d_view() = 1;
+        k_error_flag.template view<DeviceType>()() = 1;
       }
 
       if (TABSTYLE == LOOKUP) {
@@ -335,7 +337,7 @@ void PairMultiLucyRXKokkos<DeviceType>::operator()(TagPairMultiLucyRXCompute<NEI
         //jtable = static_cast<int> (((rho[j]*rho[j]) - tb->innersq) * tb->invdelta);
         jtable = static_cast<int> (((rho[j]*rho[j]) - d_table_const.innersq(tidx)) * d_table_const.invdelta(tidx));
         if (itable >= tlm1 || jtable >= tlm1){
-          k_error_flag.d_view() = 2;
+          k_error_flag.template view<DeviceType>()() = 2;
         }
         //A_i = tb->f[itable];
         A_i = d_table_const.f(tidx,itable);
@@ -353,7 +355,7 @@ void PairMultiLucyRXKokkos<DeviceType>::operator()(TagPairMultiLucyRXCompute<NEI
         //jtable = static_cast<int> (((rho[j]*rho[j]) - tb->innersq) * tb->invdelta);
         jtable = static_cast<int> ((rho[j]*rho[j] - d_table_const.innersq(tidx)) * d_table_const.invdelta(tidx));
         if (itable >= tlm1 || jtable >= tlm1){
-          k_error_flag.d_view() = 2;
+          k_error_flag.template view<DeviceType>()() = 2;
         }
         if(itable<0) itable=0;
         if(itable>=tlm1) itable=tlm1;
@@ -378,7 +380,7 @@ void PairMultiLucyRXKokkos<DeviceType>::operator()(TagPairMultiLucyRXCompute<NEI
         fpair = 0.5*(A_i + A_j)*(4.0-3.0*rfactor)*rfactor*rfactor*rfactor;
         fpair /= sqrt(rsq);
 
-      } else k_error_flag.d_view() = 3;
+      } else k_error_flag.template view<DeviceType>()() = 3;
 
       if (isite1 == isite2) fpair = sqrt(mixWtSite1old_i*mixWtSite2old_j)*fpair;
       else fpair = (sqrt(mixWtSite1old_i*mixWtSite2old_j) + sqrt(mixWtSite2old_i*mixWtSite1old_j))*fpair;
@@ -409,14 +411,14 @@ void PairMultiLucyRXKokkos<DeviceType>::operator()(TagPairMultiLucyRXCompute<NEI
     evdwl = d_table_const.e(tidx,itable);
   } else if (TABSTYLE == LINEAR) {
     if (itable >= tlm1){
-      k_error_flag.d_view() = 2;
+      k_error_flag.template view<DeviceType>()() = 2;
     }
     if(itable==0) fraction_i=0.0;
     //else fraction_i = (((rho[i]*rho[i]) - tb->rsq[itable]) * tb->invdelta);
     else fraction_i = (((rho[i]*rho[i]) - d_table_const.rsq(tidx,itable)) * d_table_const.invdelta(tidx));
     //evdwl = tb->e[itable] + fraction_i*tb->de[itable];
     evdwl = d_table_const.e(tidx,itable) + fraction_i*d_table_const.de(tidx,itable);
-  } else k_error_flag.d_view() = 3;
+  } else k_error_flag.template view<DeviceType>()() = 3;
 
   evdwl *=(pi*d_cutsq(itype,itype)*d_cutsq(itype,itype))/84.0;
   evdwlOld = mixWtSite1old_i*evdwl;
@@ -671,7 +673,6 @@ int PairMultiLucyRXKokkos<DeviceType>::pack_forward_comm_kokkos(int n, DAT::tdua
   iswap = iswap_in;
   v_buf = buf.view<DeviceType>();
   Kokkos::parallel_for(Kokkos::RangePolicy<LMPDeviceType, TagPairMultiLucyRXPackForwardComm>(0,n),*this);
-  DeviceType::fence();
   return n;
 }
 
@@ -690,7 +691,6 @@ void PairMultiLucyRXKokkos<DeviceType>::unpack_forward_comm_kokkos(int n, int fi
   first = first_in;
   v_buf = buf.view<DeviceType>();
   Kokkos::parallel_for(Kokkos::RangePolicy<LMPDeviceType, TagPairMultiLucyRXUnpackForwardComm>(0,n),*this);
-  DeviceType::fence();
 
   atomKK->modified(execution_space,DPDRHO_MASK);
 }

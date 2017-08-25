@@ -25,6 +25,7 @@
 #include "nbin_ssa_kokkos.h"
 #include "nstencil_ssa.h"
 #include "error.h"
+#include "comm.h"
 
 namespace LAMMPS_NS {
 
@@ -33,6 +34,14 @@ namespace LAMMPS_NS {
 template<class DeviceType>
 NPairSSAKokkos<DeviceType>::NPairSSAKokkos(LAMMPS *lmp) : NPair(lmp), ssa_phaseCt(27), ssa_gphaseCt(7)
 {
+  const int gphaseLenEstimate = 1; //FIXME make this 4 eventually
+  k_ssa_gphaseLen = DAT::tdual_int_1d("NPairSSAKokkos:ssa_gphaseLen",ssa_gphaseCt);
+  ssa_gphaseLen = k_ssa_gphaseLen.view<DeviceType>();
+
+  k_ssa_gitemLoc = DAT::tdual_int_2d("NPairSSAKokkos::ssa_gitemLoc",ssa_gphaseCt,gphaseLenEstimate);
+  ssa_gitemLoc = k_ssa_gitemLoc.view<DeviceType>();
+  k_ssa_gitemLen = DAT::tdual_int_2d("NPairSSAKokkos::ssa_gitemLen",ssa_gphaseCt,gphaseLenEstimate);
+  ssa_gitemLen = k_ssa_gitemLen.view<DeviceType>();
 }
 
 /* ----------------------------------------------------------------------
@@ -122,8 +131,8 @@ void NPairSSAKokkos<DeviceType>::copy_stencil_info()
   NStencilSSA *ns_ssa = dynamic_cast<NStencilSSA*>(ns);
   if (!ns_ssa) error->one(FLERR, "NStencil wasn't a NStencilSSA object");
 
-  k_nstencil_ssa = DAT::tdual_int_1d("NPairSSAKokkos:nstencil_ssa",8);
-  for (int k = 0; k < 8; ++k) {
+  k_nstencil_ssa = DAT::tdual_int_1d("NPairSSAKokkos:nstencil_ssa",5);
+  for (int k = 0; k < 5; ++k) {
     k_nstencil_ssa.h_view(k) = ns_ssa->nstencil_ssa[k];
   }
   k_nstencil_ssa.modify<LMPHostType>();
@@ -131,6 +140,31 @@ void NPairSSAKokkos<DeviceType>::copy_stencil_info()
   sx1 = ns_ssa->sx + 1;
   sy1 = ns_ssa->sy + 1;
   sz1 = ns_ssa->sz + 1;
+
+  // Setup the phases of the workplan for locals
+  ssa_phaseCt = sz1*sy1*sx1;
+  if (ssa_phaseCt > (int) k_ssa_phaseLen.dimension_0()) {
+    k_ssa_phaseLen = DAT::tdual_int_1d("NPairSSAKokkos:ssa_phaseLen",ssa_phaseCt);
+    ssa_phaseLen = k_ssa_phaseLen.view<DeviceType>();
+    k_ssa_phaseOff = DAT::tdual_int_1d_3("NPairSSAKokkos:ssa_phaseOff",ssa_phaseCt);
+    ssa_phaseOff = k_ssa_phaseOff.view<DeviceType>();
+  }
+  auto h_ssa_phaseOff = k_ssa_phaseOff.h_view;
+  k_ssa_phaseOff.sync<LMPHostType>();
+  int workPhase = 0;
+  for (int zoff = sz1 - 1; zoff >= 0; --zoff) {
+    for (int yoff = sy1 - 1; yoff >= 0; --yoff) {
+      for (int xoff = sx1 - 1; xoff >= 0; --xoff) {
+        h_ssa_phaseOff(workPhase, 0) = xoff;
+        h_ssa_phaseOff(workPhase, 1) = yoff;
+        h_ssa_phaseOff(workPhase, 2) = zoff;
+        workPhase++;
+      }
+    }
+  }
+  k_ssa_phaseOff.modify<LMPHostType>();
+  k_ssa_phaseOff.sync<DeviceType>();
+
 }
 
 /* ---------------------------------------------------------------------- */
@@ -205,21 +239,13 @@ void NPairSSAKokkos<DeviceType>::build(NeighList *list_)
 {
   NeighListKokkos<DeviceType>* list = (NeighListKokkos<DeviceType>*) list_;
   const int nlocal = includegroup?atom->nfirst:atom->nlocal;
-  const int nl_size = (nlocal + atom->nghost) * 4;
-  list->grow(nl_size); // Make special larger SSA neighbor list
+  int nl_size;
 
-  ssa_phaseCt = sz1*sy1*sx1;
+  int xbinCt = (lbinxhi - lbinxlo + sx1 - 1) / sx1 + 1;
+  int ybinCt = (lbinyhi - lbinylo + sy1 - 1) / sy1 + 1;
+  int zbinCt = (lbinzhi - lbinzlo + sz1 - 1) / sz1 + 1;
+  int phaseLenEstimate = xbinCt*ybinCt*zbinCt;
 
-  int xbin = (lbinxhi - lbinxlo + sx1 - 1) / sx1 + 1;
-  int ybin = (lbinyhi - lbinylo + sy1 - 1) / sy1 + 1;
-  int zbin = (lbinzhi - lbinzlo + sz1 - 1) / sz1 + 1;
-  int phaseLenEstimate = xbin*ybin*zbin;
-  int gphaseLenEstimate = 1; //FIXME make this 4 eventually
-
-  if (ssa_phaseCt > (int) k_ssa_phaseLen.dimension_0()) {
-    k_ssa_phaseLen = DAT::tdual_int_1d("NPairSSAKokkos:ssa_phaseLen",ssa_phaseCt);
-    ssa_phaseLen = k_ssa_phaseLen.view<DeviceType>();
-  }
   if ((ssa_phaseCt > (int) k_ssa_itemLoc.dimension_0()) ||
       (phaseLenEstimate > (int) k_ssa_itemLoc.dimension_1())) {
     k_ssa_itemLoc = DAT::tdual_int_2d("NPairSSAKokkos::ssa_itemLoc",ssa_phaseCt,phaseLenEstimate);
@@ -228,17 +254,125 @@ void NPairSSAKokkos<DeviceType>::build(NeighList *list_)
     ssa_itemLen = k_ssa_itemLen.view<DeviceType>();
   }
 
-  if (ssa_gphaseCt > (int) k_ssa_gphaseLen.dimension_0()) {
-    k_ssa_gphaseLen = DAT::tdual_int_1d("NPairSSAKokkos:ssa_gphaseLen",ssa_gphaseCt);
-    ssa_gphaseLen = k_ssa_gphaseLen.view<DeviceType>();
+  k_ssa_itemLoc.sync<LMPHostType>();
+  k_ssa_itemLen.sync<LMPHostType>();
+  k_ssa_gitemLoc.sync<LMPHostType>();
+  k_ssa_gitemLen.sync<LMPHostType>();
+  k_ssa_phaseOff.sync<LMPHostType>();
+  k_ssa_phaseLen.sync<LMPHostType>();
+  auto h_ssa_itemLoc = k_ssa_itemLoc.h_view;
+  auto h_ssa_itemLen = k_ssa_itemLen.h_view;
+  auto h_ssa_gitemLoc = k_ssa_gitemLoc.h_view;
+  auto h_ssa_gitemLen = k_ssa_gitemLen.h_view;
+  auto h_ssa_phaseOff = k_ssa_phaseOff.h_view;
+  auto h_ssa_phaseLen = k_ssa_phaseLen.h_view;
+
+{ // Preflight the neighbor list workplan
+  k_bincount.sync<LMPHostType>();
+  auto h_bincount = k_bincount.h_view;
+  k_stencil.sync<LMPHostType>();
+  auto h_stencil = k_stencil.h_view;
+  k_nstencil_ssa.sync<LMPHostType>();
+  auto h_nstencil_ssa = k_nstencil_ssa.h_view;
+  int inum = 0;
+
+  // loop over bins with local atoms, counting half of the neighbors
+  for (int workPhase = 0; workPhase < ssa_phaseCt; ++workPhase) {
+    int zoff = h_ssa_phaseOff(workPhase, 2);
+    int yoff = h_ssa_phaseOff(workPhase, 1);
+    int xoff = h_ssa_phaseOff(workPhase, 0);
+    int workItem = 0;
+  for (int zbin = lbinzlo + zoff; zbin < lbinzhi; zbin += sz1) {
+  for (int ybin = lbinylo + yoff - sy1 + 1; ybin < lbinyhi; ybin += sy1) {
+  for (int xbin = lbinxlo + xoff - sx1 + 1; xbin < lbinxhi; xbin += sx1) {
+    int inum_start = inum;
+//    if (workItem >= phaseLenEstimate) error->one(FLERR,"phaseLenEstimate was too small");
+
+    for (int subphase = 0; subphase < 4; subphase++) {
+      int s_ybin = ybin + ((subphase & 0x2) ? sy1 - 1 : 0);
+      int s_xbin = xbin + ((subphase & 0x1) ? sx1 - 1 : 0);
+      if ((s_ybin < lbinylo) || (s_ybin >= lbinyhi)) continue;
+      if ((s_xbin < lbinxlo) || (s_xbin >= lbinxhi)) continue;
+
+      const int ibin = zbin*mbiny*mbinx + s_ybin*mbinx + s_xbin;
+      const int ibinCt = h_bincount(ibin);
+      if (ibinCt > 0) {
+        int base_n = 0;
+        bool include_same = false;
+        // count all local atoms in the current stencil "subphase" as potential neighbors
+        for (int k = h_nstencil_ssa(subphase); k < h_nstencil_ssa(subphase+1); k++) {
+          const int jbin = ibin+h_stencil(k);
+          if (jbin != ibin) base_n += h_bincount(jbin);
+          else include_same = true;
+        }
+        // Calculate how many ibin particles would have had some neighbors
+        if (base_n > 0) inum += ibinCt;
+        else if (include_same) inum += ibinCt - 1;
+      }
+    }
+    h_ssa_itemLoc(workPhase,workItem) = inum_start; // record where workItem starts in ilist
+    h_ssa_itemLen(workPhase,workItem) = inum - inum_start; // record workItem length
+#ifdef DEBUG_SSA_BUILD_LOCALS
+if (h_ssa_itemLen(workPhase,workItem) < 0) fprintf(stdout, "undr%03d phase (%3d,%3d) inum %d - inum_start %d UNDERFLOW\n"
+  ,comm->me
+  ,workPhase
+  ,workItem
+  ,inum
+  ,inum_start
+);
+#endif
+    workItem++;
   }
-  if ((ssa_gphaseCt > (int) k_ssa_gitemLoc.dimension_0()) ||
-      (gphaseLenEstimate > (int) k_ssa_gitemLoc.dimension_1())) {
-    k_ssa_gitemLoc = DAT::tdual_int_2d("NPairSSAKokkos::ssa_gitemLoc",ssa_gphaseCt,gphaseLenEstimate);
-    ssa_gitemLoc = k_ssa_gitemLoc.view<DeviceType>();
-    k_ssa_gitemLen = DAT::tdual_int_2d("NPairSSAKokkos::ssa_gitemLen",ssa_gphaseCt,gphaseLenEstimate);
-    ssa_gitemLen = k_ssa_gitemLen.view<DeviceType>();
   }
+  }
+
+#ifdef DEBUG_SSA_BUILD_LOCALS
+fprintf(stdout, "phas%03d phase %3d could use %6d inums, expected %6d inums. maxworkItems = %3d, inums/workItems = %g\n"
+  ,comm->me
+  ,workPhase
+  ,inum - h_ssa_itemLoc(workPhase, 0)
+  ,(nlocal*4 + ssa_phaseCt - 1) / ssa_phaseCt
+  ,workItem
+  ,(inum - h_ssa_itemLoc(workPhase, 0)) / (double) workItem
+);
+#endif
+    // record where workPhase ends
+    h_ssa_phaseLen(workPhase) = workItem;
+  }
+#ifdef DEBUG_SSA_BUILD_LOCALS
+fprintf(stdout, "tota%03d total %3d could use %6d inums, expected %6d inums. inums/phase = %g\n"
+  ,comm->me
+  ,workPhase
+  ,inum
+  ,nlocal*4
+  ,inum / (double) workPhase
+);
+#endif
+  nl_size = inum; // record how much space is needed for the local work plan
+}
+
+  // count how many ghosts might have neighbors, and increase the work plan storage
+  k_gbincount.sync<LMPHostType>();
+  for (int workPhase = 0; workPhase < ssa_gphaseCt; workPhase++) {
+    int len = k_gbincount.h_view(workPhase + 1);
+    h_ssa_gitemLoc(workPhase,0) = nl_size; // record where workItem starts in ilist
+    h_ssa_gitemLen(workPhase,0) = len;
+    nl_size += len;
+  }
+  list->grow(nl_size); // Make special larger SSA neighbor list
+
+  k_ssa_itemLoc.modify<LMPHostType>();
+  k_ssa_itemLen.modify<LMPHostType>();
+  k_ssa_gitemLoc.modify<LMPHostType>();
+  k_ssa_gitemLen.modify<LMPHostType>();
+  k_ssa_phaseLen.modify<LMPHostType>();
+  k_ssa_itemLoc.sync<DeviceType>();
+  k_ssa_itemLen.sync<DeviceType>();
+  k_ssa_gitemLen.sync<DeviceType>();
+  k_ssa_gitemLoc.sync<DeviceType>();
+  k_ssa_phaseOff.sync<DeviceType>();
+  k_ssa_phaseLen.sync<DeviceType>();
+  k_ssa_gphaseLen.sync<DeviceType>();
 
   NPairSSAKokkosExecute<DeviceType>
     data(*list,
@@ -254,6 +388,7 @@ void NPairSSAKokkos<DeviceType>::build(NeighList *list_)
          k_nstencil_ssa.view<DeviceType>(),
          ssa_phaseCt,
          k_ssa_phaseLen.view<DeviceType>(),
+         k_ssa_phaseOff.view<DeviceType>(),
          k_ssa_itemLoc.view<DeviceType>(),
          k_ssa_itemLen.view<DeviceType>(),
          ssa_gphaseCt,
@@ -308,6 +443,7 @@ void NPairSSAKokkos<DeviceType>::build(NeighList *list_)
   data.special_flag[2] = special_flag[2];
   data.special_flag[3] = special_flag[3];
 
+  bool firstTry = true;
   data.h_resize()=1;
   while(data.h_resize()) {
     data.h_new_maxneighs() = list->maxneighs;
@@ -316,12 +452,33 @@ void NPairSSAKokkos<DeviceType>::build(NeighList *list_)
     Kokkos::deep_copy(data.resize, data.h_resize);
     Kokkos::deep_copy(data.new_maxneighs, data.h_new_maxneighs);
 
-#ifdef NOTYET
-    NPairSSAKokkosBuildFunctor<DeviceType> f(data,atoms_per_bin*5*sizeof(X_FLOAT));
-    Kokkos::parallel_for(nall, f);
-#endif
-    data.build_locals();
-    data.build_ghosts();
+    // loop over bins with local atoms, storing half of the neighbors
+    Kokkos::parallel_for(ssa_phaseCt, LAMMPS_LAMBDA (const int workPhase) {
+      data.build_locals_onePhase(firstTry, comm->me, workPhase);
+    });
+    k_ssa_itemLoc.modify<DeviceType>();
+    k_ssa_itemLen.modify<DeviceType>();
+    k_ssa_phaseLen.modify<DeviceType>();
+    k_ssa_itemLoc.sync<LMPHostType>();
+    k_ssa_itemLen.sync<LMPHostType>();
+    k_ssa_phaseLen.sync<LMPHostType>();
+    data.neigh_list.inum = h_ssa_itemLoc(ssa_phaseCt-1,h_ssa_phaseLen(ssa_phaseCt-1)-1) +
+      h_ssa_itemLen(ssa_phaseCt-1,h_ssa_phaseLen(ssa_phaseCt-1)-1);
+
+    // loop over AIR ghost atoms, storing their local neighbors
+    Kokkos::parallel_for(ssa_gphaseCt, LAMMPS_LAMBDA (const int workPhase) {
+      data.build_ghosts_onePhase(workPhase);
+    });
+    k_ssa_gitemLoc.modify<DeviceType>();
+    k_ssa_gitemLen.modify<DeviceType>();
+    k_ssa_gphaseLen.modify<DeviceType>();
+    k_ssa_gitemLoc.sync<LMPHostType>();
+    k_ssa_gitemLen.sync<LMPHostType>();
+    k_ssa_gphaseLen.sync<LMPHostType>();
+    auto h_ssa_gphaseLen = k_ssa_gphaseLen.h_view;
+    data.neigh_list.gnum = h_ssa_gitemLoc(ssa_gphaseCt-1,h_ssa_gphaseLen(ssa_gphaseCt-1)-1) +
+      h_ssa_gitemLen(ssa_gphaseCt-1,h_ssa_gphaseLen(ssa_gphaseCt-1)-1) - data.neigh_list.inum;
+    firstTry = false;
 
     DeviceType::fence();
     deep_copy(data.h_resize, data.resize);
@@ -335,38 +492,51 @@ void NPairSSAKokkos<DeviceType>::build(NeighList *list_)
     }
   }
 
-  k_ssa_phaseLen.modify<DeviceType>();
-  k_ssa_itemLoc.modify<DeviceType>();
-  k_ssa_itemLen.modify<DeviceType>();
-  k_ssa_gphaseLen.modify<DeviceType>();
-  k_ssa_gitemLoc.modify<DeviceType>();
-  k_ssa_gitemLen.modify<DeviceType>();
+  //k_ssa_phaseLen.modify<DeviceType>();
+  //k_ssa_itemLoc.modify<DeviceType>();
+  //k_ssa_itemLen.modify<DeviceType>();
+  //k_ssa_gphaseLen.modify<DeviceType>();
+  //k_ssa_gitemLoc.modify<DeviceType>();
+  //k_ssa_gitemLen.modify<DeviceType>();
 
   list->inum = data.neigh_list.inum; //FIXME once the above is in a parallel_for
   list->gnum = data.neigh_list.gnum; // it will need a deep_copy or something
+
+#ifdef DEBUG_SSA_BUILD_LOCALS
+fprintf(stdout, "Fina%03d %6d inum %6d gnum, total used %6d, allocated %6d\n"
+  ,comm->me
+  ,list->inum
+  ,list->gnum
+  ,list->inum + list->gnum
+  ,nl_size
+);
+#endif
 
   list->k_ilist.template modify<DeviceType>();
 }
 
 
 template<class DeviceType>
-void NPairSSAKokkosExecute<DeviceType>::build_locals()
+void NPairSSAKokkosExecute<DeviceType>::build_locals_onePhase(const bool firstTry, int me, int workPhase) const
 {
-  int n = 0;
+  const typename ArrayTypes<DeviceType>::t_int_1d_const_um stencil = d_stencil;
   int which = 0;
-  int inum = 0;
 
-  int workPhase = 0;
-  // loop over bins with local atoms, storing half of the neighbors
-  for (int zoff = sz1 - 1; zoff >= 0; --zoff) {
-  for (int yoff = sy1 - 1; yoff >= 0; --yoff) {
-  for (int xoff = sx1 - 1; xoff >= 0; --xoff) {
-    int workItem = 0;
+  int zoff = d_ssa_phaseOff(workPhase, 2);
+  int yoff = d_ssa_phaseOff(workPhase, 1);
+  int xoff = d_ssa_phaseOff(workPhase, 0);
+  int workItem = 0;
+  int skippedItems = 0;
   for (int zbin = lbinzlo + zoff; zbin < lbinzhi; zbin += sz1) {
   for (int ybin = lbinylo + yoff - sy1 + 1; ybin < lbinyhi; ybin += sy1) {
   for (int xbin = lbinxlo + xoff - sx1 + 1; xbin < lbinxhi; xbin += sx1) {
-//    if (workItem >= phaseLenEstimate) error->one(FLERR,"phaseLenEstimate was too small");
-    d_ssa_itemLoc(workPhase, workItem) = inum; // record where workItem starts in ilist
+    if (d_ssa_itemLen(workPhase, workItem + skippedItems) == 0) {
+      if (firstTry) ++skippedItems;
+      else ++workItem; // phase is done,should break out of three loops here if we could...
+      continue;
+    }
+    int inum_start = d_ssa_itemLoc(workPhase, workItem + skippedItems);
+    int inum = inum_start;
 
     for (int subphase = 0; subphase < 4; subphase++) {
       int s_ybin = ybin + ((subphase & 0x2) ? sy1 - 1 : 0);
@@ -377,16 +547,13 @@ void NPairSSAKokkosExecute<DeviceType>::build_locals()
       int ibin = zbin*mbiny*mbinx + s_ybin*mbinx + s_xbin;
       for (int il = 0; il < c_bincount(ibin); ++il) {
         const int i = c_bins(ibin, il);
-        n = 0;
+        int n = 0;
 
         const AtomNeighbors neighbors_i = neigh_list.get_neighbors(inum);
         const X_FLOAT xtmp = x(i, 0);
         const X_FLOAT ytmp = x(i, 1);
         const X_FLOAT ztmp = x(i, 2);
         const int itype = type(i);
-
-        const typename ArrayTypes<DeviceType>::t_int_1d_const_um stencil
-          = d_stencil;
 
         // loop over all local atoms in the current stencil "subphase"
         for (int k = d_nstencil_ssa(subphase); k < d_nstencil_ssa(subphase+1); k++) {
@@ -441,53 +608,71 @@ void NPairSSAKokkosExecute<DeviceType>::build_locals()
         }
       }
     }
-    // record where workItem ends in ilist
-    d_ssa_itemLen(workPhase,workItem) = inum - d_ssa_itemLoc(workPhase,workItem);
-    if (d_ssa_itemLen(workPhase,workItem) > 0) workItem++;
+    int len = inum - inum_start;
+#ifdef DEBUG_SSA_BUILD_LOCALS
+    if (len != d_ssa_itemLen(workPhase, workItem + skippedItems)) {
+fprintf(stdout, "Leng%03d workphase (%2d,%3d,%3d): len  = %4d, but ssa_itemLen = %4d%s\n"
+  ,me
+  ,workPhase
+  ,workItem
+  ,workItem + skippedItems
+  ,len
+  ,d_ssa_itemLen(workPhase, workItem + skippedItems)
+  ,(len > d_ssa_itemLen(workPhase, workItem + skippedItems)) ? " OVERFLOW" : ""
+);
+    }
+#endif
+    if (inum > inum_start) {
+      d_ssa_itemLoc(workPhase,workItem) = inum_start; // record where workItem starts in ilist
+      d_ssa_itemLen(workPhase,workItem) = inum - inum_start; // record actual workItem length
+      workItem++;
+    } else if (firstTry) ++skippedItems;
   }
   }
   }
 
-    // record where workPhase ends
-    d_ssa_phaseLen(workPhase++) = workItem;
-  }
-  }
-  }
+#ifdef DEBUG_SSA_BUILD_LOCALS
+fprintf(stdout, "Phas%03d phase %3d used %6d inums, workItems = %3d, skipped = %3d, inums/workItems = %g\n"
+  ,me
+  ,workPhase
+  ,inum - d_ssa_itemLoc(workPhase, 0)
+  ,workItem
+  ,skippedItems
+  ,(inum - d_ssa_itemLoc(workPhase, 0)) / (double) workItem
+);
+#endif
+    // record where workPhase actually ends
+    if (firstTry) {
+      d_ssa_phaseLen(workPhase) = workItem;
+      while (workItem < (int) d_ssa_itemLen.dimension_1()) {
+        d_ssa_itemLen(workPhase,workItem++) = 0;
+      }
+    }
 
-//FIXME  if (ssa_phaseCt != workPhase) error->one(FLERR,"ssa_phaseCt was wrong");
-
-  neigh_list.inum = inum;
 }
 
 
 template<class DeviceType>
-void NPairSSAKokkosExecute<DeviceType>::build_ghosts()
+void NPairSSAKokkosExecute<DeviceType>::build_ghosts_onePhase(int workPhase) const
 {
-  int n = 0;
+  const typename ArrayTypes<DeviceType>::t_int_1d_const_um stencil = d_stencil;
   int which = 0;
-  int inum = neigh_list.inum;
-  int gnum = 0;
 
-  // loop over AIR ghost atoms, storing their local neighbors
   // since these are ghosts, must check if stencil bin is out of bounds
-  for (int workPhase = 0; workPhase < ssa_gphaseCt; workPhase++) {
     int airnum = workPhase + 1;
     //FIXME for now, there is only 1 workItem for each ghost AIR
     int workItem;
     for (workItem = 0; workItem < 1; ++workItem) {
-      d_ssa_gitemLoc(workPhase, workItem) = inum + gnum; // record where workItem starts in ilist
+      int gNdx = d_ssa_gitemLoc(workPhase, workItem); // record where workItem starts in ilist
       for (int il = 0; il < c_gbincount(airnum); ++il) {
         const int i = c_gbins(airnum, il);
-        n = 0;
+        int n = 0;
 
-        const AtomNeighbors neighbors_i = neigh_list.get_neighbors(inum + gnum);
+        const AtomNeighbors neighbors_i = neigh_list.get_neighbors(gNdx);
         const X_FLOAT xtmp = x(i, 0);
         const X_FLOAT ytmp = x(i, 1);
         const X_FLOAT ztmp = x(i, 2);
         const int itype = type(i);
-
-        const typename ArrayTypes<DeviceType>::t_int_1d_const_um stencil
-          = d_stencil;
 
         int loc[3];
         const int ibin = coord2bin(x(i, 0), x(i, 1), x(i, 2), &(loc[0]));
@@ -541,8 +726,8 @@ void NPairSSAKokkosExecute<DeviceType>::build_ghosts()
         }
 
         if (n > 0) {
-          neigh_list.d_numneigh(inum + gnum) = n;
-          neigh_list.d_ilist(inum + (gnum++)) = i;
+          neigh_list.d_numneigh(gNdx) = n;
+          neigh_list.d_ilist(gNdx++) = i;
           if(n > neigh_list.maxneighs) {
             resize() = 1;
             if(n > new_maxneighs()) Kokkos::atomic_fetch_max(&new_maxneighs(),n);
@@ -550,12 +735,10 @@ void NPairSSAKokkosExecute<DeviceType>::build_ghosts()
         }
       }
       // record where workItem ends in ilist
-      d_ssa_gitemLen(workPhase,workItem) = inum + gnum - d_ssa_gitemLoc(workPhase,workItem);
+      d_ssa_gitemLen(workPhase,workItem) = gNdx - d_ssa_gitemLoc(workPhase,workItem);
       // if (d_ssa_gitemLen(workPhase,workItem) > 0) workItem++;
     }
     d_ssa_gphaseLen(workPhase) = workItem;
-  }
-  neigh_list.gnum = gnum;
 }
 
 }
